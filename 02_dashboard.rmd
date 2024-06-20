@@ -1,0 +1,225 @@
+---
+title: "Supply vs. Demand by path narrowness"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+resource_files:
+- out/cip_noc_long.rds
+- out/construction.rds
+- out/mean_jo.rds
+- out/narrowness.rds
+- out/raw_cip.rds
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(readxl)
+library(janitor)
+library(plotly)
+library(conflicted)
+conflicts_prefer(dplyr::filter)
+#functions-----------------------
+apply_props <- function(tbbl, val){
+  tbbl|>
+    mutate(value=prop*val)
+}
+plotlify <- function (a_ggplot, caption, font_size, pal = "Dark2") {
+  a_ggplot[["labels"]][["fill"]] <- paste0(a_ggplot[["labels"]][["fill"]],"   ")
+  a_ggplot[["labels"]][["color"]] <- paste0(a_ggplot[["labels"]][["color"]],"   ")
+  a_ggplot[["labels"]][["colour"]] <- paste0(a_ggplot[["labels"]][["colour"]],"   ")
+  if (pal == "Viridis") {
+    plt <- a_ggplot + scale_colour_viridis_d() + scale_fill_viridis_d() + 
+      theme_minimal(base_size = font_size)
+  }
+  else {
+    plt <- a_ggplot + scale_colour_brewer(palette = pal) + 
+      scale_fill_brewer(palette = pal) + theme_minimal(base_size = font_size)
+  }
+  myplot <- plotly::ggplotly(plt, tooltip = "text") %>% 
+    plotly::layout(font = list(family = "Franklin Gothic"), 
+                   margin = list(b = 120, l = 100, r = 100, t = 80), 
+                   annotations = list(x = 1, 
+                                      y = -0.4, 
+                                      text = paste("<i>", caption, "</i>"), 
+                                      showarrow = F, 
+                                      xref = "paper", 
+                                      yref = "paper", 
+                                      xanchor = "right", 
+                                      yanchor = "auto", 
+                                      xshift = -100, 
+                                      yshift = 100, 
+                                      font = list(size = 10))) %>% 
+    plotly::config(toImageButtonOptions = list(format = "svg", width = 1440, height = 720))
+  for (i in 1:length(myplot$x$data)) {
+    if (!is.null(myplot$x$data[[i]]$name)) {
+      myplot$x$data[[i]]$name = gsub("\\(", "", str_split(myplot$x$data[[i]]$name, ",")[[1]][1])
+    }
+  }
+  myplot
+}
+#read in the data-----------------
+jo <- read_rds(here("out","mean_jo.rds"))
+cip_noc_long <- read_rds(here("out","cip_noc_long.rds"))
+raw_cip <- read_rds(here("out","raw_cip.rds"))
+narrowness <- read_rds(here("out","narrowness.rds"))|>
+  rename(NOC=`For those with this occupation`, 
+         narrowness=`and grouping`)
+construction <- read_rds(here("out","construction.rds"))
+```
+
+Sidebar {.sidebar}
+=====================================
+
+```{r}
+sliderInput("int_prop", "What proportion of international students stay in BC?",
+    min = 0, max = .5, value = .25, step = .01
+  )
+selectInput(
+  "teer",
+  "What TEER do you want to consider?",
+  0:5,
+  selected = 1:3,
+  multiple = TRUE
+)
+```
+
+```{r}
+#reactive elements
+cip_counts <- reactive({
+  raw_cip|>
+  mutate(prop_international_stay=input$int_prop,
+         `International students`=if_else(is.na(`International students`), 0, `International students`),
+         mean_grads=`Canadian students`+prop_international_stay*`International students`)
+})
+
+supply_by_occupation <- reactive({
+  cip_noc_long|>
+  group_by(CIP, field_of_study)|>
+  mutate(prop=value/sum(value, na.rm = TRUE))|>
+  select(-value)|>
+  nest()|>
+  inner_join(cip_counts(), by="CIP")|>
+  mutate(data=map2(data, mean_grads, apply_props))|>
+  select(data)|>
+  unnest(data)|>
+  group_by(NOC)|>
+  summarize(supply_by_occupation=sum(value, na.rm = TRUE))
+})
+
+by_occupation <- reactive({
+  inner_join(supply_by_occupation(), jo)|>
+  full_join(narrowness)|>
+  mutate(excess_demand=mean_job_openings - supply_by_occupation,
+         teer=str_sub(NOC, 2,2))|>
+  filter(teer %in% input$teer)
+})
+```
+
+Top 40 imbalances
+=====================================  
+
+### Top 40 largest imbalances 
+    
+```{r, fig.retina=2, fig.width=12}
+renderPlotly({
+plt <- by_occupation()|>
+  mutate(abs_ed=abs(excess_demand))|>
+  slice_max(abs_ed, n=40)|>
+  ggplot(aes(excess_demand, 
+             fct_reorder(NOC, excess_demand),
+             fill=narrowness,
+             text=paste0(
+               "NOC: ",
+               NOC,
+               "\n Excess Demand: ",
+               scales::comma(excess_demand, accuracy=1))))+
+  geom_col()+
+  theme_minimal()+
+  labs(y=NULL,
+       x="Excess Supply |                                                                                                                                                    Excess Demand")
+plotlify(plt, font_size = 11, caption="")
+})
+```
+   
+Imbalances for the narrow and very narrow paths
+=====================================     
+
+### 
+    
+```{r}
+renderPlotly({
+plt <- by_occupation()|>
+  filter(narrowness %in% c("very narrow","narrow"))|>
+  ggplot(aes(excess_demand, 
+             fct_reorder(NOC, excess_demand),
+             fill=narrowness,
+             text=paste0(
+               "NOC: ",
+               NOC,
+               "\n Excess Demand: ",
+               scales::comma(excess_demand, accuracy=1))))+
+  geom_col()+
+  theme_minimal()+
+  labs(y=NULL,
+       x="Excess Supply |                                                                                                                                                                                              Excess Demand")
+plotlify(plt, font_size = 11, caption="")
+})
+```
+
+Imbalances for construction
+=====================================     
+
+### 
+    
+```{r}
+renderPlotly({
+plt <- by_occupation()|>
+  inner_join(construction)|>
+  ggplot(aes(excess_demand, 
+             fct_reorder(NOC, excess_demand),
+             fill=narrowness,
+             text=paste0(
+               "NOC: ",
+               NOC,
+               "\n Excess Demand: ",
+               scales::comma(excess_demand, accuracy=1))))+
+  geom_col()+
+  theme_minimal()+
+  labs(y=NULL,
+       x="Excess Supply |                                                                                                                                                                                              Excess Demand")
+plotlify(plt, font_size = 11, caption="")
+})
+```
+
+The Narrowness of the NOCs
+=====================================   
+
+```{r}
+plt <- narrowness|>
+  ggplot(aes(`(with this proportion)`,
+             1/`Furthermore, there were paths greater than 1%`,
+             colour=narrowness,
+             text=paste0(
+               "NOC: ",
+               NOC,
+               "\n Proportion: ",
+               round(`(with this proportion)`,3),
+               "\n Reciprocal: ",
+               round(1/`Furthermore, there were paths greater than 1%`, 3)
+               )
+             )
+         )+
+  geom_point()+
+  scale_x_continuous(trans="log10")+
+  scale_y_continuous(trans="log10")+
+  scale_color_brewer(palette="Dark2")+
+  theme_minimal()+
+  labs(x="The proportion of the most common field of study",
+       y="The reciprocal of the number of fields of study > 1%")
+ggplotly(plt, tooltip = "text")
+```
+
+
+
+
+
