@@ -1,0 +1,363 @@
+---
+title: "Post Secondary Graduates vs. Job openings that require post secondary education."
+author: "Richard Martin"
+format:
+  html:
+    page-layout: full
+    code-fold: true
+    code-summary: "Show the code"
+---
+```{r, include=FALSE}
+library(tidyverse)
+library(here)
+library(vroom)
+library(janitor)
+library(readxl)
+library(conflicted)
+library(qdapRegex)
+library(knitr)
+library(plotly)
+conflicts_prefer(dplyr::filter)
+#constants-------------------
+letters <- "[:alpha:]"
+min_year <- 2024 #will need to increment this once we get the lmo 2024 data
+prop_international <- 0 #the proportion of international students that stay
+imbalance_greater <- 200 #only plot imbalances greater than this
+#functions
+col_plot <- function(broad, title, cutoff){
+  to_plot|>
+    filter(broad_noc==broad,
+           abs(`Excess demand`)>cutoff)|>
+    ggplot(aes(`Excess demand`,
+               fct_reorder(NOC, `Excess demand`),
+               text=paste(
+                 "NOC: ",
+                 NOC,
+                 "\n Excess Demand: ",
+                 `Excess demand`
+                 )
+               )
+           )+
+    geom_col()+
+    scale_x_continuous(labels=scales::comma)+
+    coord_cartesian(xlim = c(-5000,10000))+
+    labs(y=NULL,
+         title=title)
+}
+my_dt <- function(tbbl) {
+  DT::datatable(tbbl,
+                filter = 'top',
+                extensions = "Buttons",
+                rownames = FALSE,
+                options = list(
+                  columnDefs = list(list(className = "dt-center", targets = "_all")),
+                  paging = TRUE,
+                  scrollX = TRUE,
+                  scrollY = TRUE,
+                  searching = TRUE,
+                  ordering = TRUE,
+                  dom = "Btip",
+                  buttons = list(
+                    list(extend = "csv", filename = "some_file_name"),
+                    list(extend = "excel", filename = "some_file_name")
+                  ),
+                  pageLength = 11
+                )
+  )
+}
+fix_data <- function(vctr){
+  vctr|>
+    str_remove_all(",")|>
+    as.numeric()
+}
+get_cagr <- function(tbbl){
+  start <- tbbl$graduates[tbbl$year==min(tbbl$year)]
+  end <-  tbbl$graduates[tbbl$year==max(tbbl$year)]
+  time <-  max(tbbl$year)-min(tbbl$year)
+  case_when(start==0 ~ 2, # CAGR =100% rather than Inf
+            end==0 ~ .5, # CAGR = -50% rather than -100%
+            TRUE ~ (end/start)^(1/(time)) #if neither start or end =0, actual cagr
+  )
+}
+multiply_prop <- function(tbbl, grads){
+  tbbl|>
+    mutate(value=value*grads)
+}
+make_forecast <- function(tbbl, mean_year, mean_grads, cagr){
+  tbbl|>
+    mutate(forecast_grads=mean_grads*cagr^(year-mean_year))
+}
+```
+
+```{r, message=FALSE, cache=TRUE}
+# get and process the data
+# cip_noc_long <- vroom::vroom(here("data","cip_2_noc_canada.csv"), skip = 13)[-1,]
+# colnames(cip_noc_long)[1] <- "field_of_study"
+# cip_noc_long <- cip_noc_long|>
+#   remove_empty("cols")|>
+#   pivot_longer(cols=-field_of_study, names_to = "NOC", values_to = "value")|>
+#   mutate(value=as.numeric(str_remove_all(value,",")),
+#          CIP=str_sub(field_of_study, 1, 5),
+#          field_of_study=str_sub(field_of_study, 7))|>
+#   filter(value>0)
+
+cip_noc_long <- vroom(here("data","Emplyment by CIP4_NOC5_Ed attained_BC_25-54.csv"))|>
+  filter(`High. Cert. (13)`=="Post-secondary certificate, diploma or degree")|>
+  select(-`High. Cert. (13)`)|>
+  rename(NOC=`NOC (821)`)|>
+  filter(str_detect(NOC, "\\d\\d\\d\\d\\d"))|> #only keep 5 digit NOCs
+  pivot_longer(cols=-NOC, names_to = "field_of_study", values_to = "value")|>
+  filter(str_detect(field_of_study, "\\d\\d\\.\\d\\d"))|> #only keep 4 digit CIPs (with a dot in the middle)
+  filter(value>0)|>
+  mutate(CIP=str_sub(field_of_study, 1, 5),
+         field_of_study=str_sub(field_of_study, 7))
+
+path_info <- cip_noc_long|>
+  group_by(NOC)|>
+  mutate(prop=value/sum(value))|>
+  filter(prop>.01)|>
+  mutate(greater_than_one=n())|>
+  slice_max(prop, n=1, with_ties = FALSE)|>
+  mutate(prop=round(prop, 3))|>
+  mutate(Description=str_sub(NOC, 7),
+         Description=str_remove_all(Description, "[:digit:]"),
+         NOC=str_sub(NOC, 1,5))|>
+  unite(NOC, NOC, Description, sep=" ")
+
+job_openings <- readxl::read_excel(here("data","job_openings_occupation.xlsx"), skip = 3)|>
+  remove_constant()|>
+  filter(NOC!="#T",
+         Variable=="Job Openings",
+         `Geographic Area`=="British Columbia"
+  )|>
+  select(-Variable, -`Geographic Area`)|>
+  mutate(NOC=str_remove(NOC,"#"))|>
+  unite("NOC", NOC, Description, sep=" ")|>
+  pivot_longer(cols = starts_with("2"), names_to = "year", values_to = "job_openings")|>
+  mutate(year=as.integer(year))|>
+  filter(year>=min_year)
+
+#not all job openings require post secondary... figure out the proportion.
+counts_by_noc_post_sec <- read_csv(here("data",
+                                        "employment_counts_by_noc_and_post_sec.csv"),
+                                   skip = 15,
+                                   n_max = 512, col_names = c("NOC", "total","post_secondary")
+                                   )|>
+  mutate(teer=str_sub(NOC, 2,2),
+         prop_post_sec=post_secondary/total)
+
+job_openings <- full_join(job_openings, counts_by_noc_post_sec)|>
+  na.omit()|>
+  mutate(job_openings=job_openings*prop_post_sec)|> #proportion of job openings requiring post secondary
+  select(-prop_post_sec)
+
+empty_tbbl <- tibble(year=min(job_openings$year):max(job_openings$year)) #for storing the new entrant forecast
+
+new_grads_raw <- read_excel(here("data", "3710023501_PSE grads by CIP4 and status of students.xlsx"))|>
+  clean_names()|>
+  select(year=ref_date, field_of_study, status_of_student_in_canada, graduates=value)|>
+  filter(status_of_student_in_canada %in% c("Canadian students", "International students"))|>
+  mutate(CIP=ex_between(field_of_study,"[","]"),
+         CIP=str_remove_all(CIP, letters),
+         field_of_study=word(field_of_study, sep="\\["),
+         field_of_study=trimws(field_of_study)
+  )|>
+  pivot_wider(names_from = status_of_student_in_canada, values_from = graduates)|>
+  clean_names()|>
+  mutate(canadian_students=if_else(is.na(canadian_students),0, canadian_students),
+         international_students=if_else(is.na(international_students),0, international_students),
+         graduates=canadian_students+prop_international*international_students)|>
+  select(-contains("students"))|>
+  group_by(field_of_study, cip)|>
+  slice_max(year, n=5)
+
+total_by_year <- new_grads_raw|>
+  group_by(year)|>
+  summarize(graduates=sum(graduates))
+
+mean_cagr <-(total_by_year$graduates[total_by_year$year==max(total_by_year$year)]/
+               total_by_year$graduates[total_by_year$year==max(total_by_year$year)-4])^.25
+
+new_grads <- new_grads_raw|>
+  mutate(mean_year=mean(year),
+         mean_grads=mean(graduates))|>
+  group_by(field_of_study, cip, mean_year, mean_grads)|>
+  nest()|>
+  ungroup()|>
+  filter(mean_grads>10, #filter out the worst of the data
+         mean_year>2017,
+         mean_year<2020)|>
+  mutate(raw_cagr=map_dbl(data, get_cagr),
+         mean_cagr=mean_cagr,
+         cagr=.1*raw_cagr+.9*mean_cagr,
+         new_entrants=list(empty_tbbl),
+         new_entrants=pmap(list(new_entrants, mean_year, mean_grads, cagr), make_forecast)
+         )|>
+  select(field_of_study, cip, new_entrants)|>
+  unnest(new_entrants)
+
+cip_prop <- cip_noc_long|>
+  rename(cip=CIP)|>
+  group_by(field_of_study, cip)|>
+  mutate(value=value/sum(value))|>
+  nest()
+
+new_entrants <- inner_join(cip_prop, new_grads, by="cip")|>
+  mutate(data=map2(data, forecast_grads, multiply_prop))|>
+  select(data, year)|>
+  unnest(data)|>
+  group_by(NOC, year)|>
+  summarize(new_entrant_forecast=sum(value))|>
+  mutate(Description=str_sub(NOC, 7),
+         Description=str_remove_all(Description, "[:digit:]"),
+         NOC=str_sub(NOC, 1,5))|>
+  unite(NOC, NOC, Description, sep=" ")
+
+tbbl <- inner_join(new_entrants, job_openings)|>
+  inner_join(path_info)|>
+  mutate(excess_demand=round(job_openings-new_entrant_forecast),
+         job_openings=round(job_openings),
+         new_entrant_forecast=round(new_entrant_forecast),
+         TEER=str_sub(NOC,2,2)
+  )|>
+  select(NOC,
+         TEER,
+         year,
+         `New Entrants`=new_entrant_forecast,
+         `Job Openings`=job_openings,
+         `Excess demand`=excess_demand,
+         `Proportion coming from most common CIP`=prop,
+         `# of paths greater than 1%`= greater_than_one)
+
+to_plot <- tbbl|>
+  group_by(NOC, TEER, `Proportion coming from most common CIP`, `# of paths greater than 1%`)|>
+  summarize(across(`New Entrants`:`Excess demand`, sum))|>
+  mutate(broad_noc=str_sub(NOC, 1,1))|>
+  filter(TEER %in% 1:3,
+         broad_noc %in% c(2, 3, 4, 7))
+```
+
+## Intro
+
+The goal of this exercise is to compare LMO job openings (by NOC) to a forecast of the supply of new post secondary graduates (by CIP). A couple subtleties:
+
+1) Occupations differ in terms of what proportion require post secondary education.  We deflate the LMO job openings by these proportions (which roughly align with the TEER, see @fig-prop) 
+
+2) Job openings are by occupation, whereas post secondary graduates are by field of study.  We make use of historic proportions based on the census CIP-NOC table to predict in which occupations the graduates will end up.
+
+```{r, fig.retina=2, fig.height=6}
+#| label: fig-prop
+#| fig-cap: "White diagonal indicates 100% of workers have some post secondary education, whereas the further below the white diagonal the lower the proportion requiring post secondary education."
+plt <- ggplot(counts_by_noc_post_sec, aes(total,
+                                          post_secondary,
+                                          colour = teer,
+                                          text=paste0(
+                                            "NOC: ",
+                                            NOC,
+                                            "\n Total Employed: ",
+                                            scales::comma(total),
+                                            "\n With Post Secondary Education: ",
+                                            scales::comma(post_secondary),
+                                            "\n % with Post Secondary Education: ",
+                                            scales::percent(prop_post_sec, accuracy = .1))))+
+  geom_abline(slope = 1, intercept = 0, colour="white", lwd=2)+
+  scale_x_continuous(trans="log10", labels=scales::comma)+
+  scale_y_continuous(trans="log10", labels=scales::comma)+
+  geom_point(alpha=.75)+
+  labs(title="Canadian Employment counts by NOC and Post secondary Education",
+    x="Total",
+       y="Some post secondary education")
+
+ggplotly(plt, tooltip="text")
+
+```
+
+
+
+Our forecast for graduates in year $t$ is 
+
+$$graduates_t=base_{\bar{t}} \times (1+CAGR)^{(t-\bar{t})}$$
+
+In words we take a base level of graduates and then have it either grow (or shrink) at a constant rate $CAGR$. Note that the post secondary completion data is quite noisy at the field of study level, especially for more niche fields. In order to mitigate the effect of this noise we 
+
+1) average across the most recent 5 years of data (2017:2021) to derive the `base` level at time $\bar{t}=2019$, and 
+2) we use a weighted average for the growth rate over the most recent 5 years of data. 
+
+Specifically, the weighted average puts 90% of the weight on the (relatively stable) aggregate growth rate, and the remaining 10% on the noisy field of study growth rate: i.e. We shrink the noisy growth rates towards the overall growth rate.  
+
+## Example:
+
+Suppose that we had the following data for two hypothetical CIPS, that we wanted to forecast out to the mid point of the LMO forecast, the year 2029.
+
+```{r}
+#| layout-ncol: 2
+kableExtra::kable(tibble(year=2017:2021, grads=seq(100, 500, 100)), caption = "CIP1")
+kableExtra::kable(tibble(year=2017:2020, grads=seq(400,100, -100)), caption = "CIP2")
+```
+
+### CIP1 
+\begin{align}
+& mean~grads=300\\
+& mean~year=2019\\
+& raw~cagr=\left(\frac{500}{100}\right)^{\frac{1}{4}}-1=50\%\\
+\end{align}
+
+### CIP2 
+\begin{align}
+& mean~grads=250\\
+&mean~year=2018.5\\
+&raw~cagr=\left(\frac{100}{400}\right)^{\frac{1}{3}}-1=-37\%\\
+\end{align}
+
+If these were the only two CIPS, $mean~cagr=0\%$ (the total number of graduates is constant)  
+
+### Shrunken cagrs:
+
+CIP1: $cagr=.1\times 50\%=5\%$
+
+CIP2: $cagr=.1\times -37\%=-3.7\%$
+ 
+### Forecasts:
+
+CIP1: $grads_{2029}=300\times 1.05^{10}=490$
+
+CIP2: $grads_{2029}=250\times .963^{10.5}=170$
+
+## Aggregate imbalances for some broad occupational groups (over LMO 10 year horizon)
+
+Note that in the following plots, we only include:
+
+1) occupations where the 10 year excess demand or supply exceeds `r imbalance_greater` and 
+2) occupations with TEERs 1,2 or 3
+
+```{r, fig.retina=2, fig.height=6}
+plt <- col_plot(2, "Natural and applied sciences and related occupations", imbalance_greater)
+ggplotly(plt, tooltip = "text")
+```
+
+```{r, fig.retina=2, fig.height=6}
+plt <- col_plot(3, "Health Occupations", imbalance_greater)+
+  labs(x="Excess Supply                     |                                                           Excess Demand")
+ggplotly(plt, tooltip = "text")
+```
+
+```{r, fig.retina=2, fig.height=6}
+plt <- col_plot(4, "Education, law and social, community and government services", imbalance_greater)+
+  labs(x="Excess Supply  |                              Excess Demand")
+ggplotly(plt, tooltip = "text")
+```
+
+```{r, fig.retina=2, fig.height=6}
+plt <- col_plot(7, "Trades, transport and equipment operators and related", imbalance_greater)+
+  labs(x="Excess Supply        |                                    Excess Demand")
+ggplotly(plt, tooltip = "text")
+```
+
+## The data:
+
+```{r}
+my_dt(tbbl)
+```
+
+
+
