@@ -90,16 +90,6 @@ make_forecast <- function(tbbl, mean_year, mean_grads, cagr){
 ```
 
 ```{r, message=FALSE, cache=TRUE}
-# get and process the data
-# cip_noc_long <- vroom::vroom(here("data","cip_2_noc_canada.csv"), skip = 13)[-1,]
-# colnames(cip_noc_long)[1] <- "field_of_study"
-# cip_noc_long <- cip_noc_long|>
-#   remove_empty("cols")|>
-#   pivot_longer(cols=-field_of_study, names_to = "NOC", values_to = "value")|>
-#   mutate(value=as.numeric(str_remove_all(value,",")),
-#          CIP=str_sub(field_of_study, 1, 5),
-#          field_of_study=str_sub(field_of_study, 7))|>
-#   filter(value>0)
 
 cip_noc_long <- vroom(here("data","Emplyment by CIP4_NOC5_Ed attained_BC_25-54.csv"))|>
   filter(`High. Cert. (13)`=="Post-secondary certificate, diploma or degree")|>
