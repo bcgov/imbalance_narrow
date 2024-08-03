@@ -87,9 +87,6 @@ make_forecast <- function(tbbl, mean_year, mean_grads, cagr){
   tbbl|>
     mutate(forecast_grads=mean_grads*cagr^(year-mean_year))
 }
-```
-
-```{r, message=FALSE, cache=TRUE}
 
 cip_noc_long <- vroom(here("data","Emplyment by CIP4_NOC5_Ed attained_BC_25-54.csv"))|>
   filter(`High. Cert. (13)`=="Post-secondary certificate, diploma or degree")|>
@@ -185,6 +182,11 @@ new_grads <- new_grads_raw|>
          )|>
   select(field_of_study, cip, new_entrants)|>
   unnest(new_entrants)
+
+# new_grads_total1 <- new_grads|>
+#   group_by(field_of_study, cip)|>
+#   summarize(forecast_grads=sum(forecast_grads))
+
 
 cip_prop <- cip_noc_long|>
   rename(cip=CIP)|>

@@ -20,10 +20,6 @@ library(qdapRegex)
 library(knitr)
 library(plotly)
 conflicts_prefer(dplyr::filter)
-```
-
-
-```{r, cache=TRUE}
 #constants-------------------
 number_lumps <- 6
 letters <- "[:alpha:]"
@@ -268,17 +264,9 @@ selectInput(
 ```{r}
 # reactive elements here
 
-job_openings_reactive <- reactive({
+job_openings_reactive <- reactive({ #these are deflated job openings
   job_openings|>
      filter(NOC %in% input$nocs)
-})
-
-prop_jo_reactive <- reactive({
-  inner_join(job_openings_reactive(), counts_by_noc_post_sec)|>
-  na.omit()|>
-  mutate(job_openings=job_openings*prop_post_sec)|> #proportion of job openings requiring post secondary
-  group_by(NOC)|>
-  summarize(job_openings=sum(job_openings))
 })
 
 new_entrants_reactive <- reactive({
@@ -354,7 +342,7 @@ renderPlotly({
                                        scales::comma(total_entrants, accuracy = 1)
                                      )
   ), stat="identity", alpha=.75)+
-  geom_bar(data=prop_jo_reactive(), mapping=aes(job_openings,
+  geom_bar(data=job_openings_reactive(), mapping=aes(job_openings,
                                           NOC,
                                           text=paste0(
                                             "The number of job openings requiring some post secondary education is ",
